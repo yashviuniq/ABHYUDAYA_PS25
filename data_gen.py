@@ -50,18 +50,25 @@ def generate_synthetic_data(n_samples: int = 5000, seed: int = 42) -> pd.DataFra
     appointment_type = rng.choice(
         ["PrimaryCare", "Specialist", "Lab", "Imaging"], size=n_samples, p=[0.6, 0.25, 0.1, 0.05]
     )
+    weather = rng.choice(["Sunny", "Cloudy", "Rainy", "Stormy"], size=n_samples, p=[0.6, 0.2, 0.15, 0.05])
 
     # Risk score: linear combination + non-linear effects
     score = (
-        0.02 * lead_time
-        + 0.12 * (distance_km / (distance_km + 1))
-        + 0.25 * (past_no_shows)
-        + 0.01 * np.maximum(0, (age - 60))
+        0.05 * lead_time
+        + 0.5 * (distance_km / (distance_km + 1))
+        + 1.0 * (past_no_shows)
+        + 0.05 * np.maximum(0, (age - 60))
     )
 
     # Small appointment-type and gender effects
     score += np.where(appointment_type == "Specialist", 0.2, 0.0)
     score += np.where(gender == "Other", 0.15, 0.0)
+    
+    # Weather effects
+    score += np.where(weather == "Rainy", 0.5, 0.0)
+    score += np.where(weather == "Stormy", 1.5, 0.0)
+    # Extra penalty for distance in storms
+    score += np.where((weather == "Stormy") & (distance_km > 10), 0.5, 0.0)
 
     # Convert to probability and sample binary target
     prob_no_show = _sigmoid(score - np.median(score))  # center scores
@@ -75,6 +82,7 @@ def generate_synthetic_data(n_samples: int = 5000, seed: int = 42) -> pd.DataFra
             "age": age,
             "gender": gender,
             "appointment_type": appointment_type,
+            "weather": weather,
             "no_show": no_show,
         }
     )

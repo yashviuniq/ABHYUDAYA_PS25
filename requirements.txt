@@ -5,3 +5,6 @@ shap
 streamlit
 joblib
 matplotlib
+pillow
+pytesseract
+opencv-python-headless

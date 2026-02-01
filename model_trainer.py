@@ -37,7 +37,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 NUMERIC_FEATURES = ["lead_time", "distance_km", "past_no_shows", "age"]
-CATEGORICAL_FEATURES = ["gender", "appointment_type"]
+CATEGORICAL_FEATURES = ["gender", "appointment_type", "weather"]
 TARGET = "no_show"
 
 
@@ -67,6 +67,9 @@ def generate_synthetic_data(n_samples: int = 1000, seed: int = 42, save_csv: boo
     # Distance to clinic: log-normal distribution to simulate skew
     distance = np.clip(rng.lognormal(mean=np.log(5), sigma=0.6, size=n_samples), 0.1, 200).round(2)
 
+    # Weather
+    weather = rng.choice(["Sunny", "Rainy", "Stormy"], size=n_samples, p=[0.7, 0.25, 0.05])
+
     # Strong drivers for no-show: history and lead_time
     coef_history = 1.4
     coef_lead = 0.07
@@ -75,6 +78,10 @@ def generate_synthetic_data(n_samples: int = 1000, seed: int = 42, save_csv: boo
     intercept = -2.0
 
     linear = coef_history * history + coef_lead * lead_time + coef_age * age + coef_distance * distance + intercept
+    # weather effects
+    linear += np.where(weather == "Rainy", 0.15, 0.0)
+    linear += np.where((weather == "Stormy") & (distance > 10), 1.6, 0.0)
+
     prob_no_show = 1.0 / (1.0 + np.exp(-linear))
 
     status = np.where(rng.random(n_samples) < prob_no_show, "No-Show", "Show")
@@ -88,6 +95,7 @@ def generate_synthetic_data(n_samples: int = 1000, seed: int = 42, save_csv: boo
             "Lead_Time": lead_time,
             "History_of_No_Show": history,
             "Distance_to_Clinic": distance,
+            "weather": weather,
             "Status": status,
         }
     )
@@ -110,7 +118,7 @@ def build_pipeline() -> Pipeline:
     cat_pipe = Pipeline(
         [
             ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("ohe", OneHotEncoder(handle_unknown="ignore", sparse=False)),
+            ("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
         ]
     )
 
@@ -121,7 +129,7 @@ def build_pipeline() -> Pipeline:
         ]
     )
 
-    clf = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)
+    clf = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1, class_weight="balanced")
 
     pipeline = Pipeline([("preprocess", preproc), ("clf", clf)])
 
@@ -145,12 +153,13 @@ def train_and_save(data_path: str, out_path: str) -> None:
     probs = pipeline.predict_proba(X_test)[:, 1]
     acc = accuracy_score(y_test, preds)
     auc = roc_auc_score(y_test, probs)
+    f1 = f1_score(y_test, preds)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     joblib.dump(pipeline, out_path)
 
     print(f"Model saved to {out_path}")
-    print(f"Test Accuracy: {acc:.4f}, ROC AUC: {auc:.4f}")
+    print(f"Test Accuracy: {acc:.4f}, ROC AUC: {auc:.4f}, F1-Score: {f1:.4f}")
 
 
 def train_random_forest(
@@ -170,12 +179,14 @@ def train_random_forest(
     if "Status" not in df.columns and "no_show" in df.columns:
         df["Status"] = df["no_show"].map({0: "Show", 1: "No-Show"})
 
-    required = ["Age", "Lead_Time", "History_of_No_Show", "Distance_to_Clinic", "Status"]
+    required = ["Age", "Lead_Time", "History_of_No_Show", "Distance_to_Clinic", "weather", "Status"]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns for simple training: {missing}")
 
-    X = df[["Age", "Lead_Time", "History_of_No_Show", "Distance_to_Clinic"]]
+    X = df[["Age", "Lead_Time", "History_of_No_Show", "Distance_to_Clinic"]].copy()
+    # Map weather to numeric categories for simple RF
+    X["weather"] = df["weather"].map({"Sunny": 0, "Cloudy": 1, "Rainy": 2, "Stormy": 3})
     y = df["Status"].map({"Show": 0, "No-Show": 1})
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -226,6 +237,12 @@ def _map_feature_to_reason(feature_name: str) -> str:
     if "appointment" in name or "specialist" in name or "primary" in name or "lab" in name:
         tokens = feature_name.split("_")
         return f"Appointment Type: {tokens[-1]}" if len(tokens) > 1 else "Appointment Type"
+    if "weather" in name or "storm" in name or "rain" in name or "cloud" in name:
+        if "storm" in name:
+            return "Severe Weather (Storm)"
+        if "rain" in name:
+            return "Inclement Weather (Rain)"
+        return "Weather Condition"
 
     # fallback
     return feature_name
@@ -317,11 +334,14 @@ def get_prediction_reason(
     else:
         # assume simple RandomForest trained on numeric columns
         clf = model
-        expected = ["Age", "Lead_Time", "History_of_No_Show", "Distance_to_Clinic"]
+        expected = ["Age", "Lead_Time", "History_of_No_Show", "Distance_to_Clinic", "weather"]
         missing = [c for c in expected if c not in X.columns]
         if missing:
             raise ValueError(f"Missing required columns for simple RF model: {missing}")
-        X_proc = X[expected]
+        # ensure same column order used during training (weather becomes numeric mapping)
+        X_proc = X[expected].copy()
+        if X_proc["weather"].dtype == object:
+            X_proc["weather"] = X_proc["weather"].map({"Sunny": 0, "Cloudy": 1, "Rainy": 2, "Stormy": 3})
         X_arr = X_proc.values
         probs = clf.predict_proba(X_arr)[:, 1]
         prob = float(probs[0])
