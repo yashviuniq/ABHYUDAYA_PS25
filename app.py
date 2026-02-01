@@ -20,6 +20,7 @@ from data_gen import generate_synthetic_data
 from explainer import explain_dataset, load_pipeline
 from ocr_engine import extract_ehr_data
 from doctor_finder import find_nearby_doctors
+from gemini_insights import get_gemini_analysis
 
 MODEL_PATH = "models/rf_pipeline.joblib"
 
@@ -82,7 +83,7 @@ def style_badge(label: str, color: str) -> str:
 
 def render_doctor_finder(patient_df: pd.DataFrame, api_key: str, key_suffix: str = "main"):
     """Render the recommended doctors section with unique state keys."""
-    if st.button("Find Nearest Doctor", key=f"find_doctor_btn_{key_suffix}"):
+    if st.button("Find Available Doctor", key=f"find_doctor_btn_{key_suffix}"):
         st.session_state[f"find_doctor_{key_suffix}"] = True
 
     if st.session_state.get(f"find_doctor_{key_suffix}", False):
@@ -292,6 +293,68 @@ def main():
 
         st.write(f"Showing {len(filtered_df)} patients")
 
+        # --- AI Strategic Insights ---
+        st.markdown("---")
+        st.subheader("🤖 AI Strategic Outlook (Gemini)")
+        
+        if st.button("Generate Reasoning & Future Predictions", key="gen_ai_btn"):
+            with st.spinner("Analyzing patient data constraints and predicting future trends..."):
+                # 1. Prepare Data Summary
+                total_patients = len(df)
+                high_risk_count = len(df[df['risk'] == 'High'])
+                high_risk_pct = (high_risk_count / total_patients) * 100
+                
+                # Top correlated features for High Risk (Simple Heuristic for prompt)
+                high_risk_df = df[df['risk'] == 'High']
+                
+                # Weather impact
+                weather_col = "weather"
+                if "weather" not in high_risk_df.columns:
+                    if "Weather" in high_risk_df.columns:
+                        weather_col = "Weather"
+                    else:
+                        weather_col = None
+                
+                if weather_col:
+                    stormy_count = len(high_risk_df[high_risk_df[weather_col] == 'Stormy'])
+                    rainy_count = len(high_risk_df[high_risk_df[weather_col] == 'Rainy'])
+                else:
+                    stormy_count = 0
+                    rainy_count = 0
+                
+                # Distance impact
+                dist_col = "distance_km"
+                if "distance_km" not in high_risk_df.columns:
+                    if "Distance_to_Clinic" in high_risk_df.columns:
+                        dist_col = "Distance_to_Clinic"
+                    else:
+                        dist_col = None
+
+                long_dist_count = len(high_risk_df[high_risk_df[dist_col] > 10]) if dist_col else 0
+
+                summary_text = f"""
+                - Total Patients: {total_patients}
+                - High Risk Patients: {high_risk_count} ({high_risk_pct:.1f}%)
+                - Weather Context: {stormy_count} high-risk patients facing Stormy weather, {rainy_count} facing Rainy weather.
+                - Location Context: {long_dist_count} high-risk patients live >10km away.
+                - Dominant Appointment Mode: {high_risk_df['Appointment_Mode'].mode()[0] if 'Appointment_Mode' in high_risk_df and not high_risk_df['Appointment_Mode'].empty else 'Unknown'}
+                """
+                
+                # 2. Call Gemini
+                # Using the user-provided key. In production, use env vars.
+                API_KEY = "AIzaSyAoCM_8lNc5dkX-BaMQ7KWBuwCn3CSwUKQ" 
+                
+                # Show the data being analyzed
+                st.markdown("### 📊 Data Summary")
+                st.info(summary_text)
+                
+                insights = get_gemini_analysis(summary_text, API_KEY)
+                
+                st.markdown("### 💡 Strategic Analysis")
+                st.write(insights)
+        st.markdown("---")
+        # -----------------------------
+
         # Display Custom Table for Admins
         for i, row in filtered_df.iterrows():
             with st.container():
@@ -417,17 +480,62 @@ def main():
                      base_val = base_val[0]
             # ------------------------------------
             
+            # --- Feature Names Extraction ---
+            try:
+                feature_names = model.named_steps["preprocess"].get_feature_names_out()
+            except:
+                feature_names = [f"Feature {i}" for i in range(X_trans.shape[1])]
+            
+            # Clean feature names (remove num__, cat__ etc)
+            clean_names = []
+            for name in feature_names:
+                name = str(name).replace("num__", "").replace("cat__", "").replace("rem__", "")
+                name = name.replace("_", " ").title()
+                clean_names.append(name)
+            # --------------------------------
+
             # Plot
+            st.markdown("### Risk Drivers Analysis")
+            st.caption("This chart shows how each factor pushes the risk **Higher (+)** or **Lower (-)** compared to the average patient.")
+            
+            # Create a custom Explanation object for better labeling if needed, 
+            # or just pass lists to waterfall if supported, but legacy supports proper structure.
+            # We will assign the feature names to the explainer for this plot or create a new Explanation Object
+            
+            # Construct a shap.Explanation object for the single sample
+            # This is the modern way and handles labels much better than legacy waterfall
+            shap_exp = shap.Explanation(
+                values=sv, 
+                base_values=base_val, 
+                data=patient_mod.values[0] if hasattr(patient_mod, "values") else None, # This might mismatch dimensions if X_trans used
+                feature_names=clean_names
+            )
+            
+            # Note: X_trans was used for SHAP, so we should probably not pass raw patient_mod data 
+            # if we want the feature values to align with X_trans features. 
+            # But users want to see "Age=40", not "num__age=0.5". 
+            # Waterfall plot usually shows the transformed value next to the name. 
+            # For simplicity, we just pass the transformed values if we want them to match the bars.
+            
+            # Let's stick to legacy with feature_names argument which is robust
             st.pyplot(shap.plots._waterfall.waterfall_legacy(
                 base_val, 
                 sv, 
-                feature_names=explainer.feature_names if hasattr(explainer, 'feature_names') else None, 
+                feature_names=clean_names,
+                max_display=10,
                 show=False
             ))
             
+            st.info("""
+            **How to read this graph:**
+            *   **f(x)** is the final Risk Probability.
+            *   **E[f(x)]** is the Average Risk.
+            *   **Red Bars** push the risk UP (Bad).
+            *   **Blue Bars** push the risk DOWN (Good).
+            """)
+            
         except Exception as e:
-            st.error(f"SHAP Error Details: {e}")
-            # Optional: st.write(f"Debug: expected_value shape={np.shape(explainer.expected_value)}")
+            st.error(f"Visualization Error: {e}")
 
     st.markdown("---")
     st.markdown("---")
